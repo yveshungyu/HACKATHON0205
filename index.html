@@ -65,24 +65,27 @@
                 </div>
 
                 <!-- Video Display -->
-                <div class="video-display">
+                <div class="video-display" id="videoDisplay">
                     <video id="videoElement" autoplay playsinline></video>
+                    <canvas id="videoOverlayCanvas" class="video-overlay-canvas"></canvas>
+                    <div class="finger-cursor" id="fingerCursor"></div>
+                    <div class="click-marker" id="clickMarker"></div>
                     <div class="video-overlay">
                         <div class="overlay-indicator" id="generatingIndicator"></div>
                         <div class="gesture-indicator" id="gestureIndicator"></div>
+                    </div>
+                    <!-- Voice prompt hint (after dwell-click) -->
+                    <div class="click-prompt-panel" id="clickPromptPanel" style="display:none;">
+                        <div class="click-prompt-header">
+                            <span>🎯 Speak now — what should happen here?</span>
+                        </div>
+                        <div class="click-prompt-info" id="clickPromptInfo"></div>
                     </div>
                 </div>
 
                 <!-- Hand Tracking (hidden) -->
                 <video id="handVideo" class="hand-video" autoplay playsinline></video>
                 <canvas id="handCanvas" class="hand-canvas"></canvas>
-
-                <!-- Virtual Cursor (finger pointer) -->
-                <div id="virtualCursor" class="virtual-cursor">
-                    <div class="cursor-dot"></div>
-                    <div class="cursor-ring"></div>
-                    <div class="cursor-click-effect"></div>
-                </div>
 
                 <!-- Speech Panel -->
                 <div class="speech-panel">

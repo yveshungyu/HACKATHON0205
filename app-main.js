@@ -45,6 +45,7 @@ let lastVoiceInteractionTime = 0;
 let lastAudioEventTime = 0;
 const VOICE_INTERACTION_INTERVAL = 2000; // 2 seconds for voice
 const AUDIO_EVENT_INTERVAL = 5000; // 5 seconds for audio events
+let temporaryMuteUntil = 0; // Timestamp to temporarily mute speech recognition
 
 // Hand Gesture Control
 let hands;
@@ -54,18 +55,20 @@ let currentGesture = null;
 let gesturesInWindow = []; // Store gestures during speech
 let collectingGestures = false;
 
-// Virtual Cursor (finger pointing mode)
-let cursorModeActive = false;
-let virtualCursorEl = null;
-let cursorX = 0;
-let cursorY = 0;
-let smoothCursorX = 0;
-let smoothCursorY = 0;
-const CURSOR_SMOOTHING = 0.35; // Lower = smoother but more lag (0-1)
-let isPinching = false;
-let wasPinching = false;
-let pinchCooldown = false;
-let lastHoveredElement = null;
+// Finger Pointer / Click-Grounded Editing
+let isPointing = false;
+let fingerCursorPos = { x: 0, y: 0 }; // Normalized 0-1
+let dwellStartTime = 0;
+let dwellPos = { x: 0, y: 0 }; // Position when dwell started
+let isDwelling = false;
+let dwellConfirmed = false; // True after dwell click fires
+const DWELL_TIME = 1500; // ms - hold still for 1.5s to click
+const DWELL_MOVE_THRESHOLD = 0.03; // Max movement to still count as "still"
+let lastClickPos = null; // { xPercent, yPercent }
+let lastClickFrameData = null; // { fullFrame, zoomFrame }
+let visionResult = null; // Last vision API result
+let waitingForVoicePrompt = false; // True after dwell click, waiting for speech
+let dwellProgressInterval = null;
 
 // Auto-evolution
 let autoEvolutionInterval;
@@ -105,7 +108,14 @@ const gestureIndicator = document.getElementById('gestureIndicator');
 const handVideo = document.getElementById('handVideo');
 const handCanvas = document.getElementById('handCanvas');
 const sessionTimerEl = document.getElementById('sessionTimer');
-virtualCursorEl = document.getElementById('virtualCursor');
+
+// Finger cursor & click DOM
+const fingerCursorEl = document.getElementById('fingerCursor');
+const clickMarkerEl = document.getElementById('clickMarker');
+const videoDisplay = document.getElementById('videoDisplay');
+const videoOverlayCanvas = document.getElementById('videoOverlayCanvas');
+const clickPromptPanel = document.getElementById('clickPromptPanel');
+const clickPromptInfo = document.getElementById('clickPromptInfo');
 
 // Session timer
 let sessionStartTime = 0;
@@ -116,7 +126,7 @@ const SESSION_DURATION = 150; // 150 seconds
 
 let openaiApiKey = '';
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
     const savedKey = localStorage.getItem('odyssey_api_key');
     if (savedKey) {
         apiKeyInput.value = savedKey;
@@ -144,6 +154,17 @@ window.addEventListener('DOMContentLoaded', () => {
         speechRecognitionCheckbox.disabled = true;
         speechRecognitionCheckbox.checked = false;
         speechEnabled = false;
+    }
+    
+    // Request microphone + camera permissions immediately on page load
+    // so the browser remembers and doesn't ask again later
+    try {
+        console.log('🎤 Pre-requesting microphone & camera permissions...');
+        window.microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        window.cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        console.log('✅ Microphone & camera permissions granted and stored');
+    } catch (e) {
+        console.warn('⚠️ Could not pre-request permissions:', e.message);
     }
 });
 
@@ -253,11 +274,13 @@ startBtn.addEventListener('click', async () => {
         
         console.log('✅ Connected to Odyssey');
         
-        // Request all permissions upfront (only once)
+        // Reuse existing microphone stream, or request if somehow missing
         if (!window.microphoneStream) {
-            console.log('🎤 Requesting microphone permission...');
+            console.log('🎤 Microphone stream not found, requesting...');
             window.microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
             console.log('✅ Microphone permission granted');
+        } else {
+            console.log('✅ Reusing existing microphone stream');
         }
         
         // Setup audio analysis
@@ -312,10 +335,6 @@ async function stopEverything() {
         audioContext.close();
     }
     
-    if (cursorModeActive) {
-        exitCursorMode();
-    }
-    
     if (hands) {
         hands.close();
     }
@@ -346,6 +365,17 @@ async function stopEverything() {
     lastAudioEventTime = 0;
     initialStoryline = '';
     currentSceneState = '';
+    lastClickPos = null;
+    lastClickFrameData = null;
+    visionResult = null;
+    isPointing = false;
+    isDwelling = false;
+    dwellConfirmed = false;
+    waitingForVoicePrompt = false;
+    temporaryMuteUntil = 0;
+    stopDwellProgress();
+    hideFingerCursor();
+    hideVoicePromptHint();
 }
 
 // ==================== AUDIO ANALYSIS ====================
@@ -492,6 +522,13 @@ function startSpeechRecognition() {
     };
     
     recognition.onresult = async (event) => {
+        // Check if we should temporarily ignore speech (during mute period)
+        let now = Date.now();
+        if (temporaryMuteUntil > 0 && now < temporaryMuteUntil) {
+            console.log('🔇 Speech ignored (waiting for click confirmation)');
+            return; // Ignore speech during mute period
+        }
+        
         let interimTranscript = '';
         let finalTranscript = '';
         
@@ -546,6 +583,17 @@ function startSpeechRecognition() {
                 return; // Command handled
             }
             
+            // ===== INTERCEPT: If waiting for voice prompt after dwell-click =====
+            if (waitingForVoicePrompt && lastClickPos) {
+                console.log('🎯 Voice intercepted for click-grounded edit:', spokenText);
+                handleVoiceGroundedPrompt(spokenText);
+                // Restore original audio features after processing
+                setTimeout(() => {
+                    currentAudioFeatures = originalFeatures;
+                }, 3000);
+                return; // Don't do normal voice interaction
+            }
+            
             // Start collecting gestures when speech is detected
             if (!collectingGestures) {
                 collectingGestures = true;
@@ -558,7 +606,7 @@ function startSpeechRecognition() {
                 if (collectingGestures) {
                     collectingGestures = false;
                     
-                    const now = Date.now();
+                    now = Date.now();
                     const timeSinceLastVoice = now - lastVoiceInteractionTime;
                     
                     if (timeSinceLastVoice > VOICE_INTERACTION_INTERVAL) {
@@ -583,7 +631,7 @@ function startSpeechRecognition() {
         }
         
         // Also trigger on any sound (even without text) if volume is significant
-        const now = Date.now();
+        now = Date.now();
         if (!finalTranscript && currentAudioFeatures.volume > 20 && 
             now - lastVoiceInteractionTime > VOICE_INTERACTION_INTERVAL) {
             console.log('🎵 Sound detected (music/humming), triggering audio-based interaction');
@@ -1193,7 +1241,12 @@ async function startHandGestureTracking() {
         
         hands.onResults(onHandResults);
         
-        // Setup camera
+        // Setup camera - reuse pre-requested stream if available
+        if (window.cameraStream) {
+            handVideo.srcObject = window.cameraStream;
+            console.log('✅ Reusing existing camera stream for hand tracking');
+        }
+        
         camera = new window.Camera(handVideo, {
             onFrame: async () => {
                 if (hands) {
@@ -1231,7 +1284,6 @@ function onHandResults(results) {
             const landmarks = results.multiHandLandmarks[i];
             const confidence = results.multiHandedness[i]?.score || 0;
             
-            // Only process if confidence is high enough (85% sure it's a hand)
             if (confidence < 0.85) {
                 continue;
             }
@@ -1240,64 +1292,91 @@ function onHandResults(results) {
             window.drawConnectors(canvasCtx, landmarks, window.HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 3});
             window.drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2, radius: 5});
             
-            // Recognize gesture only for high confidence detections
+            // Recognize gesture
             const gesture = recognizeGesture(landmarks);
             
-            // === VIRTUAL CURSOR MODE ===
-            // Pointing gesture activates cursor mode
+            // ===== FINGER CURSOR + DWELL CLICK =====
             if (gesture === '☝️ Pointing') {
-                if (!cursorModeActive) {
-                    enterCursorMode();
+                const indexTip = landmarks[8];
+                const newX = 1.0 - indexTip.x; // Mirror X for webcam
+                const newY = indexTip.y;
+                
+                if (!isPointing) {
+                    // Just started pointing
+                    isPointing = true;
+                    dwellConfirmed = false;
+                    dwellStartTime = Date.now();
+                    dwellPos.x = newX;
+                    dwellPos.y = newY;
                 }
-                // Track index finger tip (landmark 8) for cursor position
-                updateCursorPosition(landmarks[8]);
-            }
-            // Pinch gesture while in cursor mode = click
-            else if (gesture === '🤏 Pinch' && cursorModeActive) {
-                if (!wasPinching) {
-                    triggerVirtualClick();
+                
+                fingerCursorPos.x = newX;
+                fingerCursorPos.y = newY;
+                updateFingerCursor();
+                
+                // Dwell detection: check if finger is staying still
+                const dx = Math.abs(newX - dwellPos.x);
+                const dy = Math.abs(newY - dwellPos.y);
+                const moved = dx > DWELL_MOVE_THRESHOLD || dy > DWELL_MOVE_THRESHOLD;
+                
+                if (moved) {
+                    // Finger moved — reset dwell
+                    dwellPos.x = newX;
+                    dwellPos.y = newY;
+                    dwellStartTime = Date.now();
+                    isDwelling = false;
+                    stopDwellProgress();
+                    fingerCursorEl?.classList.remove('dwelling');
+                } else if (!dwellConfirmed) {
+                    // Finger is still — check dwell time
+                    const elapsed = Date.now() - dwellStartTime;
+                    
+                    if (!isDwelling && elapsed > 300) {
+                        // Start showing dwell progress after 300ms of stillness
+                        isDwelling = true;
+                        startDwellProgress();
+                        fingerCursorEl?.classList.add('dwelling');
+                    }
+                    
+                    if (elapsed >= DWELL_TIME) {
+                        // DWELL CONFIRMED = CLICK!
+                        dwellConfirmed = true;
+                        isDwelling = false;
+                        stopDwellProgress();
+                        fingerCursorEl?.classList.remove('dwelling');
+                        fingerCursorEl?.classList.add('clicked');
+                        setTimeout(() => fingerCursorEl?.classList.remove('clicked'), 500);
+                        
+                        console.log('🎯 DWELL CLICK at', newX.toFixed(2), newY.toFixed(2));
+                        handleFingerClick(newX, newY);
+                    }
                 }
-                isPinching = true;
-                // Still track thumb-index midpoint for cursor while pinching
-                const midX = (landmarks[4].x + landmarks[8].x) / 2;
-                const midY = (landmarks[4].y + landmarks[8].y) / 2;
-                updateCursorPosition({ x: midX, y: midY });
-            }
-            // Any other gesture exits cursor mode
-            else if (cursorModeActive && gesture && gesture !== '☝️ Pointing' && gesture !== '🤏 Pinch') {
-                exitCursorMode();
-            }
-            
-            // Track pinch state
-            if (gesture !== '🤏 Pinch') {
-                wasPinching = false;
-                isPinching = false;
+                
             } else {
-                wasPinching = isPinching;
+                if (isPointing) {
+                    isPointing = false;
+                    isDwelling = false;
+                    stopDwellProgress();
+                    hideFingerCursor();
+                }
             }
             
-            // === ORIGINAL GESTURE COLLECTION (only when NOT in cursor mode) ===
-            if (!cursorModeActive && gesture && gesture !== currentGesture) {
+            // Update gesture state (existing logic)
+            if (gesture && gesture !== currentGesture) {
                 console.log('🖐️ Gesture detected:', gesture);
                 currentGesture = gesture;
                 
-                // If we're collecting gestures (during/after speech), add to collection
                 if (collectingGestures) {
                     gesturesInWindow.push(gesture);
-                    console.log('📝 Gesture added to collection');
                 }
-            }
-            
-            if (!cursorModeActive) {
-                currentGesture = gesture;
             }
         }
     } else {
-        // No hands detected
-        if (cursorModeActive) {
-            exitCursorMode();
-        }
         currentGesture = null;
+        isPointing = false;
+        isDwelling = false;
+        stopDwellProgress();
+        hideFingerCursor();
         gestureIndicator.classList.remove('active');
     }
     
@@ -1369,145 +1448,511 @@ function recognizeGesture(landmarks) {
 
 // Removed standalone gesture handler - gestures now collected with speech
 
-// ==================== VIRTUAL CURSOR MODE ====================
+// ==================== FINGER CURSOR & DWELL-CLICK + VOICE GROUNDING ====================
 
-function enterCursorMode() {
-    cursorModeActive = true;
-    if (virtualCursorEl) {
-        virtualCursorEl.classList.add('active');
-    }
-    gestureIndicator.textContent = '☝️ Cursor Mode';
-    gestureIndicator.classList.add('active', 'cursor-mode');
-    console.log('🎯 Cursor mode ACTIVATED');
+function updateFingerCursor() {
+    if (!fingerCursorEl || !videoDisplay) return;
+    
+    const rect = videoDisplay.getBoundingClientRect();
+    const px = fingerCursorPos.x * rect.width;
+    const py = fingerCursorPos.y * rect.height;
+    
+    fingerCursorEl.style.left = px + 'px';
+    fingerCursorEl.style.top = py + 'px';
+    fingerCursorEl.classList.add('active');
+    
+    // Show pointing gesture indicator
+    gestureIndicator.textContent = '☝️ Pointing';
+    gestureIndicator.classList.add('active');
 }
 
-function exitCursorMode() {
-    cursorModeActive = false;
-    isPinching = false;
-    wasPinching = false;
-    if (virtualCursorEl) {
-        virtualCursorEl.classList.remove('active', 'hovering', 'clicking');
+function hideFingerCursor() {
+    fingerCursorEl?.classList.remove('active');
+    fingerCursorEl?.classList.remove('dwelling');
+    fingerCursorEl?.classList.remove('clicked');
+    if (gestureIndicator.textContent === '☝️ Pointing') {
+        gestureIndicator.classList.remove('active');
     }
-    gestureIndicator.classList.remove('active', 'cursor-mode');
-    
-    // Remove hover effect from last element
-    if (lastHoveredElement) {
-        lastHoveredElement = null;
-    }
-    console.log('🎯 Cursor mode DEACTIVATED');
 }
 
-function updateCursorPosition(fingerTip) {
-    // MediaPipe gives normalized coords (0-1), camera is mirrored so flip X
-    const rawX = 1 - fingerTip.x; // Flip X for mirror
-    const rawY = fingerTip.y;
-    
-    // Map to viewport coordinates
-    cursorX = rawX * window.innerWidth;
-    cursorY = rawY * window.innerHeight;
-    
-    // Smooth the cursor movement (lerp)
-    smoothCursorX += (cursorX - smoothCursorX) * CURSOR_SMOOTHING;
-    smoothCursorY += (cursorY - smoothCursorY) * CURSOR_SMOOTHING;
-    
-    // Move the virtual cursor element
-    if (virtualCursorEl) {
-        virtualCursorEl.style.left = smoothCursorX + 'px';
-        virtualCursorEl.style.top = smoothCursorY + 'px';
+function startDwellProgress() {
+    // Update the CSS custom property for the ring animation
+    if (fingerCursorEl) {
+        fingerCursorEl.style.setProperty('--dwell-duration', DWELL_TIME + 'ms');
     }
-    
-    // Check what element is under the cursor
-    updateHoverState(smoothCursorX, smoothCursorY);
 }
 
-function updateHoverState(x, y) {
-    // Temporarily hide cursor to get the element underneath
-    if (virtualCursorEl) virtualCursorEl.style.display = 'none';
-    const elementUnder = document.elementFromPoint(x, y);
-    if (virtualCursorEl) virtualCursorEl.style.display = '';
+function stopDwellProgress() {
+    // Reset dwell visual
+    if (fingerCursorEl) {
+        fingerCursorEl.classList.remove('dwelling');
+    }
+}
+
+function handleFingerClick(xNorm, yNorm) {
+    // Show click marker animation
+    if (clickMarkerEl && videoDisplay) {
+        const rect = videoDisplay.getBoundingClientRect();
+        clickMarkerEl.style.left = (xNorm * rect.width) + 'px';
+        clickMarkerEl.style.top = (yNorm * rect.height) + 'px';
+        clickMarkerEl.style.display = 'block';
+        clickMarkerEl.style.animation = 'none';
+        clickMarkerEl.offsetHeight; // Force reflow
+        clickMarkerEl.style.animation = 'clickRipple 0.6s ease-out forwards';
+        setTimeout(() => { clickMarkerEl.style.display = 'none'; }, 600);
+    }
     
-    if (!elementUnder) {
-        if (virtualCursorEl) virtualCursorEl.classList.remove('hovering');
-        lastHoveredElement = null;
+    // Store click position
+    lastClickPos = { xPercent: xNorm, yPercent: yNorm };
+    
+    // Capture frames from video
+    lastClickFrameData = captureSelectionFrames(xNorm, yNorm);
+    
+    // IMMEDIATELY pre-analyze scene (don't wait for voice)
+    visionResult = null;
+    preAnalyzeScene(xNorm, yNorm);
+    
+    // Mute speech recognition for 1 second after click
+    temporaryMuteUntil = Date.now() + 1000;
+    console.log('🔇 Speech muted for 1 second after click');
+    
+    // Enter "waiting for voice prompt" mode after 1 second
+    waitingForVoicePrompt = true;
+    showVoicePromptHint(xNorm, yNorm, true); // true = show countdown
+    
+    console.log('📍 Dwell-click registered at', xNorm.toFixed(2), yNorm.toFixed(2));
+    console.log('🎤 Will start listening in 1 second...');
+}
+
+// Pre-analyze the clicked scene area immediately (runs in background)
+async function preAnalyzeScene(xNorm, yNorm) {
+    if (!openaiApiKey || !lastClickFrameData) {
+        console.warn('⚠️ Cannot pre-analyze: missing key or frame data');
         return;
     }
     
-    // Check if hovering over an interactive element
-    const isInteractive = elementUnder.matches(
-        'button, a, input, textarea, select, [role="button"], .btn, .icon-btn, .checkbox-label, label'
-    ) || elementUnder.closest(
-        'button, a, input, textarea, select, [role="button"], .btn, .icon-btn, .checkbox-label, label'
-    );
-    
-    if (isInteractive) {
-        if (virtualCursorEl) virtualCursorEl.classList.add('hovering');
-    } else {
-        if (virtualCursorEl) virtualCursorEl.classList.remove('hovering');
-    }
-    
-    lastHoveredElement = elementUnder;
+    try {
+        console.log('👁️ Pre-analyzing scene at click point...');
+        
+        const systemPrompt = `You analyze a video frame where the user pointed (marked with a red circle).
+Describe what is at and around the click point with detailed spatial relationships.
+
+Return ONLY valid JSON:
+{
+  "selection": "what is exactly at the click point (1-3 words, e.g. 'dirt road', 'grass field', 'river bank')",
+  "locationHint": "detailed spatial description from MULTIPLE perspectives (e.g. 'on the dirt road, in the left foreground of the frame, to the right of the running man')",
+  "nearbyAnchor": "the most recognizable nearby object (e.g. 'pine tree', 'red barn', 'stone wall')",
+  "framePosition": "position in frame using natural language (e.g. 'left foreground', 'right background', 'center middle-ground', 'far background')",
+  "relativeToSubject": "position relative to main subject/person if visible (e.g. 'to the man's right', 'behind the runner', 'in front of the person')",
+  "depth": "depth in scene (e.g. 'foreground', 'middle-ground', 'background', 'far background')",
+  "sceneDescription": "brief description of the full visible scene (1 sentence)",
+  "confidence": 0.0-1.0
 }
 
-function triggerVirtualClick() {
-    if (pinchCooldown) return;
-    
-    // Set cooldown to prevent rapid fire clicks
-    pinchCooldown = true;
-    setTimeout(() => { pinchCooldown = false; }, 600);
-    
-    // Visual feedback
-    if (virtualCursorEl) {
-        virtualCursorEl.classList.add('clicking');
-        setTimeout(() => {
-            virtualCursorEl.classList.remove('clicking');
-        }, 400);
-    }
-    
-    // Find the element under the cursor
-    if (virtualCursorEl) virtualCursorEl.style.display = 'none';
-    const targetElement = document.elementFromPoint(smoothCursorX, smoothCursorY);
-    if (virtualCursorEl) virtualCursorEl.style.display = '';
-    
-    if (!targetElement) {
-        console.log('🎯 Click at empty area');
-        return;
-    }
-    
-    console.log('🎯 Virtual CLICK on:', targetElement.tagName, targetElement.id || targetElement.className);
-    
-    // Find the closest interactive parent if needed
-    const clickTarget = targetElement.closest(
-        'button, a, input, textarea, select, [role="button"], .btn, .icon-btn, .checkbox-label, label'
-    ) || targetElement;
-    
-    // Dispatch mouse events to simulate a real click
-    const eventOptions = {
-        bubbles: true,
-        cancelable: true,
-        clientX: smoothCursorX,
-        clientY: smoothCursorY,
-        view: window
-    };
-    
-    clickTarget.dispatchEvent(new MouseEvent('mouseenter', eventOptions));
-    clickTarget.dispatchEvent(new MouseEvent('mouseover', eventOptions));
-    clickTarget.dispatchEvent(new MouseEvent('mousedown', eventOptions));
-    clickTarget.dispatchEvent(new MouseEvent('mouseup', eventOptions));
-    clickTarget.dispatchEvent(new MouseEvent('click', eventOptions));
-    
-    // For checkboxes and inputs, also handle focus
-    if (clickTarget.tagName === 'INPUT' || clickTarget.tagName === 'TEXTAREA') {
-        clickTarget.focus();
-    }
-    
-    // For checkboxes wrapped in labels
-    if (clickTarget.tagName === 'LABEL' || clickTarget.classList.contains('checkbox-label')) {
-        const checkbox = clickTarget.querySelector('input[type="checkbox"]');
-        if (checkbox) {
-            checkbox.checked = !checkbox.checked;
-            checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+CRITICAL Rules:
+- Provide LAYERED spatial descriptions: frame position + depth + relative to subjects
+- Use natural 3D spatial language: left/right foreground, center background, etc.
+- If there's a person/main subject, describe position relative to them
+- Combine multiple perspectives in locationHint for maximum precision
+- Examples of good locationHint:
+  ✓ "on the dirt path in the left foreground, to the right side of the running man"
+  ✓ "in the background on the right side, behind the trees"
+  ✓ "center middle-ground, directly in front of the person"
+- Do NOT use vague terms or grid coordinates`;
+
+        const userContent = [
+            {
+                type: 'image_url',
+                image_url: { url: lastClickFrameData.fullFrame, detail: 'low' }
+            },
+            {
+                type: 'image_url',
+                image_url: { url: lastClickFrameData.zoomFrame, detail: 'high' }
+            },
+            {
+                type: 'text',
+                text: `User pointed at (${(xNorm * 100).toFixed(0)}%, ${(yNorm * 100).toFixed(0)}%) marked with a red circle. Describe what is at and around this exact point.`
+            }
+        ];
+        
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${openaiApiKey}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userContent }
+                ],
+                max_tokens: 250,
+                temperature: 0.15
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('OpenAI pre-analysis error: ' + response.status);
         }
+        
+        const data = await response.json();
+        const raw = data.choices[0].message.content.trim();
+        const clean = raw.replace(/```json|```/g, '').trim();
+        visionResult = JSON.parse(clean);
+        
+        console.log('👁️ Scene pre-analysis complete:', visionResult);
+        
+        // Update the hint panel with detailed scene info after 1 second
+        setTimeout(() => {
+            if (clickPromptInfo && waitingForVoicePrompt) {
+                const details = [];
+                if (visionResult.selection) details.push(`${visionResult.selection}`);
+                if (visionResult.framePosition) details.push(`(${visionResult.framePosition})`);
+                if (visionResult.relativeToSubject) details.push(`${visionResult.relativeToSubject}`);
+                
+                clickPromptInfo.textContent = `📍 Pointing at: ${details.join(' ')} — Now speak!`;
+            }
+        }, 1000);
+        
+    } catch (error) {
+        console.error('❌ Scene pre-analysis error:', error);
+        visionResult = null;
     }
+}
+
+// Also allow mouse/touch click on video as fallback
+if (videoDisplay) {
+    videoDisplay.addEventListener('click', (e) => {
+        if (e.target.closest('.click-prompt-panel')) return;
+        
+        const rect = videoDisplay.getBoundingClientRect();
+        const xNorm = (e.clientX - rect.left) / rect.width;
+        const yNorm = (e.clientY - rect.top) / rect.height;
+        
+        console.log('🖱️ Mouse click at', xNorm.toFixed(2), yNorm.toFixed(2));
+        handleFingerClick(xNorm, yNorm);
+    });
+}
+
+function showVoicePromptHint(xNorm, yNorm, showCountdown = false) {
+    if (!clickPromptPanel) return;
+    clickPromptPanel.style.display = 'block';
+    
+    if (showCountdown) {
+        // Show countdown for 1 second
+        clickPromptInfo.textContent = `📍 (${(xNorm * 100).toFixed(0)}%, ${(yNorm * 100).toFixed(0)}%) — Ready in 1 second...`;
+        setTimeout(() => {
+            if (waitingForVoicePrompt) {
+                clickPromptInfo.textContent = `🎤 Now speak: what should happen here?`;
+            }
+        }, 1000);
+    } else {
+        clickPromptInfo.textContent = `📍 (${(xNorm * 100).toFixed(0)}%, ${(yNorm * 100).toFixed(0)}%) — Now speak: what should happen here?`;
+    }
+    
+    // Auto-timeout after 15 seconds if no speech
+    setTimeout(() => {
+        if (waitingForVoicePrompt) {
+            waitingForVoicePrompt = false;
+            temporaryMuteUntil = 0; // Clear mute
+            hideVoicePromptHint();
+            console.log('⏱️ Voice prompt timed out');
+        }
+    }, 15000);
+}
+
+function hideVoicePromptHint() {
+    if (!clickPromptPanel) return;
+    clickPromptPanel.style.display = 'none';
+    temporaryMuteUntil = 0; // Clear mute when hiding hint
+}
+
+// Called from speech recognition when we're in waiting-for-voice-prompt mode
+async function handleVoiceGroundedPrompt(spokenText) {
+    if (!lastClickPos) return;
+    
+    waitingForVoicePrompt = false;
+    temporaryMuteUntil = 0; // Clear mute
+    console.log('🎯 Voice prompt for click:', spokenText);
+    
+    if (clickPromptInfo) {
+        clickPromptInfo.textContent = '🔄 Grounding "' + spokenText + '" to scene...';
+    }
+    
+    try {
+        let finalPrompt;
+        
+        // If we already have pre-analyzed scene data, use it directly
+        if (visionResult && visionResult.locationHint) {
+            console.log('✅ Using pre-analyzed scene data:', visionResult);
+            
+            // Try a second vision call with both scene context AND user prompt for best rewrite
+            finalPrompt = await getVisionGroundedPrompt(spokenText);
+            
+        } else {
+            // No pre-analysis available, do full vision call now
+            console.log('⚠️ No pre-analysis, doing full vision call...');
+            finalPrompt = await getVisionGroundedPrompt(spokenText);
+        }
+        
+        console.log('📤 Final grounded prompt:', finalPrompt);
+        if (clickPromptInfo) {
+            clickPromptInfo.textContent = '✅ Sent: ' + finalPrompt;
+        }
+        
+        // Send to Odyssey midstream
+        if (isStreaming && odysseyClient) {
+            generatingIndicator.classList.add('active');
+            
+            await odysseyClient.interact({ prompt: finalPrompt });
+            
+            interactionCount++;
+            interactionCountEl.textContent = interactionCount;
+            currentSceneState = finalPrompt;
+            storyContext.push(finalPrompt);
+            if (storyContext.length > 10) storyContext.shift();
+            
+            setTimeout(() => generatingIndicator.classList.remove('active'), 2000);
+        }
+        
+        // Auto-hide hint after success
+        setTimeout(hideVoicePromptHint, 3000);
+        
+    } catch (error) {
+        console.error('❌ Voice grounded prompt error:', error);
+        if (clickPromptInfo) {
+            clickPromptInfo.textContent = '❌ Error: ' + error.message;
+        }
+        setTimeout(hideVoicePromptHint, 3000);
+    }
+}
+
+function captureSelectionFrames(xNorm, yNorm) {
+    try {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const vw = videoElement.videoWidth || 1280;
+        const vh = videoElement.videoHeight || 720;
+        
+        // 1. Full frame with red click marker
+        canvas.width = vw;
+        canvas.height = vh;
+        ctx.drawImage(videoElement, 0, 0, vw, vh);
+        
+        const markerX = xNorm * vw;
+        const markerY = yNorm * vh;
+        ctx.beginPath();
+        ctx.arc(markerX, markerY, 18, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ff0000';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(markerX, markerY, 5, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff0000';
+        ctx.fill();
+        
+        const fullFrame = canvas.toDataURL('image/jpeg', 0.85);
+        
+        // 2. Zoom crop around click (25% of frame centered on click)
+        const cropSize = Math.min(vw, vh) * 0.25;
+        const cropX = Math.max(0, Math.min(vw - cropSize, markerX - cropSize / 2));
+        const cropY = Math.max(0, Math.min(vh - cropSize, markerY - cropSize / 2));
+        
+        const zoomCanvas = document.createElement('canvas');
+        zoomCanvas.width = 512;
+        zoomCanvas.height = 512;
+        const zCtx = zoomCanvas.getContext('2d');
+        zCtx.drawImage(videoElement, cropX, cropY, cropSize, cropSize, 0, 0, 512, 512);
+        
+        const zMarkerX = ((markerX - cropX) / cropSize) * 512;
+        const zMarkerY = ((markerY - cropY) / cropSize) * 512;
+        zCtx.beginPath();
+        zCtx.arc(zMarkerX, zMarkerY, 12, 0, Math.PI * 2);
+        zCtx.strokeStyle = '#ff0000';
+        zCtx.lineWidth = 3;
+        zCtx.stroke();
+        
+        const zoomFrame = zoomCanvas.toDataURL('image/jpeg', 0.9);
+        
+        console.log('📸 Captured full frame + zoom crop');
+        return { fullFrame, zoomFrame };
+        
+    } catch (error) {
+        console.error('❌ Frame capture error:', error);
+        return null;
+    }
+}
+
+async function getVisionGroundedPrompt(userPrompt) {
+    if (!openaiApiKey) {
+        console.warn('⚠️ No OpenAI key, using fallback');
+        return composeFallbackPrompt(userPrompt);
+    }
+    
+    if (!lastClickFrameData) {
+        console.warn('⚠️ No frame data, using fallback');
+        return composeFallbackPrompt(userPrompt);
+    }
+    
+    // If we already have pre-analyzed scene and it's high confidence,
+    // skip the second vision call and compose directly
+    if (visionResult && visionResult.confidence >= 0.7 && visionResult.locationHint) {
+        console.log('⚡ Using pre-analyzed scene for fast grounding');
+        const composed = composeWithSceneLocation(userPrompt, visionResult.locationHint);
+        console.log('📝 Composed prompt:', composed);
+        return composed;
+    }
+    
+    try {
+        const { xPercent, yPercent } = lastClickPos;
+        
+        // Build scene context from pre-analysis if available
+        let sceneContext = '';
+        if (visionResult) {
+            sceneContext = `\n\nPre-analysis of click point:
+- At click: "${visionResult.selection || 'unknown'}"
+- Frame position: "${visionResult.framePosition || 'unknown'}"
+- Depth: "${visionResult.depth || 'unknown'}"
+- Relative to subject: "${visionResult.relativeToSubject || 'unknown'}"
+- Location hint: "${visionResult.locationHint || 'unknown'}"
+- Nearby anchor: "${visionResult.nearbyAnchor || 'unknown'}"
+- Scene: "${visionResult.sceneDescription || currentSceneState || 'unknown'}"
+Use ALL these spatial details to write the MOST precise prompt rewrite possible.`;
+        }
+        
+        const systemPrompt = `You analyze a video frame where the user pointed (marked with a red circle) and rewrite their voice command into a precise, scene-grounded prompt for a video AI.
+
+Return ONLY valid JSON:
+{
+  "selection": "what is at the click point (1-3 words)",
+  "locationHint": "detailed spatial description from multiple perspectives",
+  "framePosition": "position in frame (e.g. 'left foreground', 'right background')",
+  "relativeToSubject": "position relative to main subject/person if visible",
+  "depth": "depth in scene (foreground/middle-ground/background)",
+  "nearbyAnchor": "closest recognizable object near the click",
+  "confidence": 0.0-1.0,
+  "promptRewrite": "the user's intent rewritten with EXACT multi-dimensional scene location"
+}
+
+CRITICAL rules for promptRewrite:
+- PRESERVE the user's intent exactly (if they say "add a car", the rewrite must add a car)
+- REPLACE vague words (here/there/this) with LAYERED spatial descriptions
+- Use MULTIPLE spatial references:
+  * Frame position: "in the left foreground", "right background"
+  * Depth: "in the foreground", "far background"
+  * Relative to subjects: "to the man's right", "behind the runner"
+  * Landmarks: "beside the tree", "on the road"
+- NEVER use grid language like "left area", "upper portion"
+- Example good rewrites:
+  ✓ "add a car on the dirt road in the left foreground, to the right of the running man"
+  ✓ "place a tree in the background on the right side, behind the existing trees"
+- The rewrite must specify WHERE in 3D space (left/right + depth + relative)
+- Keep under 35 words${sceneContext}`;
+
+        const userContent = [
+            {
+                type: 'image_url',
+                image_url: { url: lastClickFrameData.fullFrame, detail: 'low' }
+            },
+            {
+                type: 'image_url',
+                image_url: { url: lastClickFrameData.zoomFrame, detail: 'high' }
+            },
+            {
+                type: 'text',
+                text: `User pointed at (${(xPercent * 100).toFixed(0)}%, ${(yPercent * 100).toFixed(0)}%) and said: "${userPrompt}"\n\nRewrite their prompt with exact scene-aware location.`
+            }
+        ];
+        
+        console.log('🤖 Calling OpenAI vision for scene-grounded rewrite...');
+        
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${openaiApiKey}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userContent }
+                ],
+                max_tokens: 250,
+                temperature: 0.15
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('OpenAI vision error: ' + response.status);
+        }
+        
+        const data = await response.json();
+        const raw = data.choices[0].message.content.trim();
+        
+        const clean = raw.replace(/```json|```/g, '').trim();
+        const result = JSON.parse(clean);
+        
+        // Update visionResult with the richer data
+        visionResult = { ...visionResult, ...result };
+        
+        console.log('👁️ Vision grounded result:', visionResult);
+        
+        // Use the prompt rewrite if it's good
+        const rewrite = result.promptRewrite || '';
+        if (rewrite && !containsGridLanguage(rewrite) && rewrite.length > 5) {
+            console.log('✅ Using vision promptRewrite:', rewrite);
+            return rewrite;
+        }
+        
+        // Fallback: compose with location hint from either this call or pre-analysis
+        const locationHint = result.locationHint || (visionResult && visionResult.locationHint);
+        if (locationHint) {
+            return composeWithSceneLocation(userPrompt, locationHint);
+        }
+        
+        return composeFallbackPrompt(userPrompt);
+        
+    } catch (error) {
+        console.error('❌ Vision grounding error:', error);
+        
+        // If pre-analysis exists, use it as fallback
+        if (visionResult && visionResult.locationHint) {
+            console.log('🔄 Falling back to pre-analyzed scene data');
+            return composeWithSceneLocation(userPrompt, visionResult.locationHint);
+        }
+        
+        return composeFallbackPrompt(userPrompt);
+    }
+}
+
+function containsGridLanguage(text) {
+    const gridTerms = ['middle-left', 'top-right', 'bottom-center', 'upper-left', 'lower-right', 'center area', 'left area', 'right area'];
+    const lower = text.toLowerCase();
+    return gridTerms.some(t => lower.includes(t));
+}
+
+function composeWithSceneLocation(userPrompt, locationHint) {
+    let prompt = userPrompt
+        .replace(/\b(here|there|this area|that area|this spot|that spot)\b/gi, locationHint);
+    
+    if (prompt === userPrompt) {
+        prompt = `${userPrompt} ${locationHint}`;
+    }
+    
+    return prompt;
+}
+
+function composeFallbackPrompt(userPrompt) {
+    if (!lastClickPos) return userPrompt;
+    
+    const { xPercent, yPercent } = lastClickPos;
+    
+    const xDesc = xPercent < 0.33 ? 'on the left side' : xPercent > 0.66 ? 'on the right side' : 'in the center';
+    const yDesc = yPercent < 0.33 ? 'at the top' : yPercent > 0.66 ? 'at the bottom' : 'in the middle';
+    
+    return `${userPrompt} ${xDesc} ${yDesc} of the scene`;
 }
 
 // ==================== SESSION TIMER ====================
@@ -1594,7 +2039,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 console.log('🎬 Voice Evolution Video loaded');
-console.log('📝 Enter your Odyssey API Key and click START');
+console.log('📝 Enter your API Keys and click START');
 console.log('🎵 Voice Controls:');
 console.log('   🎬 Say "CUT" to freeze');
 console.log('   🎬 Say "ACTION" to continue');
@@ -1602,3 +2047,6 @@ console.log('   💥 Sudden loud = shock effect');
 console.log('   😱 Sustained loud = increasing horror');
 console.log('   🤫 Sudden quiet = eerie silence');
 console.log('   🖐️ Use hand gestures for actions');
+console.log('   ☝️ Point finger = cursor on video');
+console.log('   🤏 Pinch = click to select area');
+console.log('   🎯 Click + type prompt = grounded scene edit');

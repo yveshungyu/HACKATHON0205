@@ -323,6 +323,108 @@ textarea::placeholder {
     animation: fadeIn 0.3s ease-out;
 }
 
+/* Finger cursor overlay */
+.finger-cursor {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.85);
+    border: 2px solid rgba(255, 255, 255, 1);
+    box-shadow: 0 0 12px rgba(255, 255, 255, 0.6), 0 0 30px rgba(255, 255, 255, 0.2);
+    pointer-events: none;
+    z-index: 20;
+    display: none;
+    transform: translate(-50%, -50%);
+    transition: width 0.15s, height 0.15s, background 0.15s;
+}
+
+.finger-cursor.active {
+    display: block;
+}
+
+.finger-cursor.dwelling {
+    background: rgba(255, 200, 0, 0.85);
+    border-color: rgba(255, 200, 0, 1);
+    box-shadow: 0 0 12px rgba(255, 200, 0, 0.6), 0 0 30px rgba(255, 200, 0, 0.2);
+    animation: dwellPulse var(--dwell-duration, 1500ms) ease-in forwards;
+}
+
+@keyframes dwellPulse {
+    0% { width: 24px; height: 24px; box-shadow: 0 0 12px rgba(255, 200, 0, 0.6); }
+    100% { width: 36px; height: 36px; box-shadow: 0 0 30px rgba(255, 200, 0, 1), 0 0 60px rgba(255, 200, 0, 0.4); }
+}
+
+.finger-cursor.clicked {
+    width: 16px;
+    height: 16px;
+    background: #22ff22;
+    border-color: #44ff44;
+    box-shadow: 0 0 18px rgba(34, 255, 34, 0.8), 0 0 40px rgba(34, 255, 34, 0.3);
+}
+
+/* Click marker on video */
+.click-marker {
+    position: absolute;
+    width: 32px;
+    height: 32px;
+    border: 3px solid #ff4444;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 19;
+    display: none;
+    transform: translate(-50%, -50%);
+    animation: clickRipple 0.6s ease-out forwards;
+}
+
+@keyframes clickRipple {
+    0% { width: 10px; height: 10px; opacity: 1; border-width: 3px; }
+    100% { width: 50px; height: 50px; opacity: 0; border-width: 1px; }
+}
+
+/* Video overlay canvas for debug drawing */
+.video-overlay-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 15;
+}
+
+/* Click prompt panel (voice hint) */
+.click-prompt-panel {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 200, 0, 0.4);
+    border-radius: 12px;
+    padding: 16px 24px;
+    z-index: 25;
+    min-width: 320px;
+    max-width: 90%;
+    animation: fadeInUp 0.3s ease-out;
+    text-align: center;
+}
+
+.click-prompt-header {
+    margin-bottom: 8px;
+    font-size: 0.95rem;
+    letter-spacing: 0.5px;
+    color: #ffcc00;
+    font-weight: 600;
+}
+
+.click-prompt-info {
+    font-size: 0.8rem;
+    opacity: 0.6;
+    line-height: 1.4;
+}
+
 /* Hand tracking elements (hidden but processing) */
 .hand-video,
 .hand-canvas {
@@ -469,99 +571,6 @@ footer {
         opacity: 1;
         transform: translateY(0);
     }
-}
-
-/* Virtual Cursor */
-.virtual-cursor {
-    position: fixed;
-    top: 0;
-    left: 0;
-    z-index: 99999;
-    pointer-events: none;
-    display: none;
-    transform: translate(-50%, -50%);
-    transition: opacity 0.15s ease;
-}
-
-.virtual-cursor.active {
-    display: block;
-}
-
-.cursor-dot {
-    width: 14px;
-    height: 14px;
-    background: #ffffff;
-    border-radius: 50%;
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    box-shadow: 0 0 10px rgba(255, 255, 255, 0.8), 0 0 20px rgba(255, 255, 255, 0.4);
-    z-index: 2;
-}
-
-.cursor-ring {
-    width: 40px;
-    height: 40px;
-    border: 2px solid rgba(255, 255, 255, 0.6);
-    border-radius: 50%;
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 1;
-    transition: all 0.15s ease;
-}
-
-.virtual-cursor.hovering .cursor-ring {
-    width: 50px;
-    height: 50px;
-    border-color: rgba(100, 200, 255, 0.8);
-}
-
-.cursor-click-effect {
-    width: 40px;
-    height: 40px;
-    border: 2px solid rgba(255, 255, 255, 0.9);
-    border-radius: 50%;
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%) scale(1);
-    opacity: 0;
-    z-index: 0;
-}
-
-.virtual-cursor.clicking .cursor-click-effect {
-    animation: cursorClickPulse 0.4s ease-out forwards;
-}
-
-.virtual-cursor.clicking .cursor-dot {
-    transform: translate(-50%, -50%) scale(0.7);
-    background: #64c8ff;
-}
-
-@keyframes cursorClickPulse {
-    0% {
-        transform: translate(-50%, -50%) scale(1);
-        opacity: 0.8;
-        border-color: rgba(100, 200, 255, 0.9);
-    }
-    100% {
-        transform: translate(-50%, -50%) scale(2.5);
-        opacity: 0;
-        border-color: rgba(100, 200, 255, 0);
-    }
-}
-
-/* Cursor mode indicator */
-.gesture-indicator.cursor-mode {
-    display: block;
-    background: rgba(0, 0, 0, 0.85);
-    border: 1px solid rgba(100, 200, 255, 0.5);
-    color: #64c8ff;
-    font-size: 0.9rem;
-    animation: none;
 }
 
 /* Responsive */
