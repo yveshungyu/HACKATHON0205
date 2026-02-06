@@ -52,8 +52,6 @@ let hands;
 let camera;
 let handGestureEnabled = true;
 let currentGesture = null;
-let gesturesInWindow = []; // Store gestures during speech
-let collectingGestures = false;
 
 // Finger Pointer / Click-Grounded Editing
 let isPointing = false;
@@ -498,10 +496,10 @@ function startSpeechRecognition() {
     
     recognition.onresult = async (event) => {
         // Check if we should temporarily ignore speech (during mute period)
-        let now = Date.now();
+        const now = Date.now();
         if (temporaryMuteUntil > 0 && now < temporaryMuteUntil) {
             console.log('🔇 Speech ignored (waiting for click confirmation)');
-            return; // Ignore speech during mute period
+            return;
         }
         
         let interimTranscript = '';
@@ -516,7 +514,7 @@ function startSpeechRecognition() {
             }
         }
         
-        // Start tracking peaks when user starts speaking
+        // Start tracking audio peaks when user starts speaking
         if (interimTranscript && !isSpeaking) {
             isSpeaking = true;
             speechAudioPeaks = {
@@ -529,14 +527,22 @@ function startSpeechRecognition() {
             console.log('🎤 Started tracking speech audio peaks');
         }
         
+        // Update display with what user is saying
+        const displayText = finalTranscript || interimTranscript;
+        if (displayText) {
+            spokenWordsEl.textContent = displayText;
+            speechStatusEl.textContent = 'Speaking...';
+            speechStatusEl.className = 'status-badge speaking';
+        }
+        
         if (finalTranscript) {
             const spokenText = finalTranscript.trim();
             
-            // Stop tracking and use the peaks
+            // Stop tracking and capture the peaks
             isSpeaking = false;
-            console.log('🎤 Speech ended - using peaks:', speechAudioPeaks);
+            console.log('🎤 Speech ended - peaks:', speechAudioPeaks);
             
-            // Temporarily override current audio features with speech peaks
+            // Override current audio features with speech peaks
             const originalFeatures = { ...currentAudioFeatures };
             currentAudioFeatures = {
                 volume: speechAudioPeaks.maxVolume || currentAudioFeatures.volume,
@@ -550,77 +556,20 @@ function startSpeechRecognition() {
             
             addToRecentWords(spokenText);
             console.log('🗣️ Recognized:', spokenText);
-            console.log('📊 Using speech peaks - Vol:', speechAudioPeaks.maxVolume, 'Energy:', speechAudioPeaks.maxEnergy);
+            console.log('📊 Speech peaks - Vol:', speechAudioPeaks.maxVolume, 'Energy:', speechAudioPeaks.maxEnergy);
             
-            // Check for special commands first
-            if (checkSpecialCommands(spokenText)) {
-                console.log('📌 Special command executed');
-                return; // Command handled
-            }
-            
-            // ===== INTERCEPT: If waiting for voice prompt after dwell-click =====
+            // ONLY process speech if waiting for voice after dwell-click
             if (waitingForVoicePrompt && lastClickPos) {
-                console.log('🎯 Voice intercepted for click-grounded edit:', spokenText);
+                console.log('🎯 Voice captured for click-grounded edit:', spokenText);
                 handleVoiceGroundedPrompt(spokenText);
-                // Restore original audio features after processing
-                setTimeout(() => {
-                    currentAudioFeatures = originalFeatures;
-                }, 3000);
-                return; // Don't do normal voice interaction
+            } else {
+                console.log('💤 Speech ignored (no active dwell-click)');
             }
-            
-            // Start collecting gestures when speech is detected
-            if (!collectingGestures) {
-                collectingGestures = true;
-                gesturesInWindow = [];
-                console.log('👂 Started collecting gestures for 2 seconds...');
-            }
-            
-            // Wait 2 seconds after speech to collect gestures, then send all together
-            setTimeout(async () => {
-                if (collectingGestures) {
-                    collectingGestures = false;
-                    
-                    now = Date.now();
-                    const timeSinceLastVoice = now - lastVoiceInteractionTime;
-                    
-                    if (timeSinceLastVoice > VOICE_INTERACTION_INTERVAL) {
-                        console.log('✅ Sending speech + gestures to OpenAI');
-                        console.log('📊 Collected gestures:', gesturesInWindow);
-                        
-                        // Get most recent gesture if any
-                        const recentGesture = gesturesInWindow.length > 0 ? 
-                            gesturesInWindow[gesturesInWindow.length - 1] : null;
-                        
-                        await interactWithVideo(spokenText, 'voice', recentGesture);
-                    }
-                    
-                    gesturesInWindow = [];
-                }
-            }, 2000); // Wait 2 seconds after speech
             
             // Restore original audio features after processing
             setTimeout(() => {
                 currentAudioFeatures = originalFeatures;
             }, 3000);
-        }
-        
-        // Also trigger on any sound (even without text) if volume is significant
-        now = Date.now();
-        if (!finalTranscript && currentAudioFeatures.volume > 20 && 
-            now - lastVoiceInteractionTime > VOICE_INTERACTION_INTERVAL) {
-            console.log('🎵 Sound detected (music/humming), triggering audio-based interaction');
-            await interactWithVideo('', 'audio');
-        }
-        
-        // Check for dramatic audio events (less frequently)
-        await checkDramaticAudioEvents();
-        
-        const displayText = finalTranscript || interimTranscript;
-        if (displayText) {
-            spokenWordsEl.textContent = displayText;
-            speechStatusEl.textContent = 'Speaking...';
-            speechStatusEl.className = 'status-badge speaking';
         }
     };
     
@@ -820,11 +769,9 @@ function generateAutoEvolutionPrompt() {
     return evolutions[Math.floor(Math.random() * evolutions.length)];
 }
 
-async function interactWithVideo(spokenText, source = 'voice', gesture = null) {
+async function interactWithVideo(spokenText) {
     console.log('🎯 interactWithVideo called');
     console.log('📝 Speech:', spokenText);
-    console.log('🖐️ Gesture:', gesture);
-    console.log('📊 Source:', source);
     
     if (!isStreaming) {
         console.log('⚠️ Not streaming, skipping interaction');
@@ -836,16 +783,11 @@ async function interactWithVideo(spokenText, source = 'voice', gesture = null) {
     }
     
     try {
-        // Update the appropriate timer
-        if (source === 'voice' || source === 'audio') {
-            lastVoiceInteractionTime = Date.now();
-        } else {
-            lastAudioEventTime = Date.now();
-        }
+        lastVoiceInteractionTime = Date.now();
         generatingIndicator.classList.add('active');
         
-        // Use OpenAI to generate optimal prompt (with gesture if available)
-        const prompt = await generatePromptWithOpenAI(spokenText, gesture);
+        // Use OpenAI to generate optimal prompt (speech + audio features)
+        const prompt = await generatePromptWithOpenAI(spokenText);
         
         console.log('📤 SENDING TO ODYSSEY:', prompt);
         
@@ -989,8 +931,18 @@ async function handleSpeedUpCommand() {
 async function checkDramaticAudioEvents() {
     if (isPaused || !isStreaming || !isConnected) return;
     
-    const { volume, volumeChange, loudDuration, quietDuration, pitch, energy } = currentAudioFeatures;
+    // BLOCK dramatic events during dwell-click / voice-prompt flow
+    if (waitingForVoicePrompt || dwellConfirmed || isDwelling) {
+        return;
+    }
+    
+    // BLOCK dramatic events for 8 seconds after any intentional interaction
     const now = Date.now();
+    if (now - lastVoiceInteractionTime < 8000) {
+        return;
+    }
+    
+    const { volume, volumeChange, loudDuration, quietDuration, pitch, energy } = currentAudioFeatures;
     
     // Use separate timer for audio events
     if (now - lastAudioEventTime < AUDIO_EVENT_INTERVAL) return;
@@ -1013,8 +965,8 @@ async function checkDramaticAudioEvents() {
         dramaticPrompt = 'SUDDEN SILENCE eerie quiet, unsettling calm, ominous stillness';
         console.log('🤫 Sudden silence!');
     }
-    // Sustained quiet (suspense)
-    else if (quietDuration > 4) {
+    // Sustained quiet (suspense) — raised threshold to avoid false triggers
+    else if (quietDuration > 10) {
         dramaticPrompt = 'SUSPENSEFUL quiet tension, anticipation building, something is about to happen';
         console.log('😰 Sustained quiet - building suspense!');
     }
@@ -1035,12 +987,20 @@ async function checkDramaticAudioEvents() {
         try {
             generatingIndicator.classList.add('active');
             
+            // Save current scene state — dramatic events should NOT overwrite it
+            const savedSceneState = currentSceneState;
+            
             // Use OpenAI for dramatic events too
-            const prompt = await generatePromptWithOpenAI(dramaticPrompt, null);
+            const prompt = await generatePromptWithOpenAI(dramaticPrompt);
+            
+            // Restore scene state so dramatic events don't hijack the narrative
+            currentSceneState = savedSceneState;
             
             await odysseyClient.interact({ prompt: prompt });
             interactionCount++;
             interactionCountEl.textContent = interactionCount;
+            
+            console.log('🎭 Dramatic event sent (scene state preserved)');
             
             setTimeout(() => {
                 generatingIndicator.classList.remove('active');
@@ -1052,10 +1012,10 @@ async function checkDramaticAudioEvents() {
     }
 }
 
-// Generate prompt using OpenAI
-async function generatePromptWithOpenAI(spokenText, gesture) {
+// Generate prompt using OpenAI (speech + audio features only, no gestures)
+async function generatePromptWithOpenAI(spokenText) {
     try {
-        const { volume, pitch, energy, volumeChange, loudDuration, quietDuration } = currentAudioFeatures;
+        const { volume, pitch, energy } = currentAudioFeatures;
         
         // Build context for OpenAI - prioritize user's words!
         let systemPrompt = `You are a prompt translator for Odyssey video world.
@@ -1066,8 +1026,7 @@ Current scene: "${currentSceneState}"
 
 How to interpret input:
 - USER'S WORDS = highest priority, execute literally
-- Hand gesture = modify environment (weather/lighting) to support their words
-- Audio features = adjust intensity ONLY
+- Audio features = adjust intensity/mood ONLY (do NOT override user's words)
 
 Output a clear, direct Odyssey prompt. DO NOT add poetic language. Be literal and specific.`;
 
@@ -1077,26 +1036,9 @@ Output a clear, direct Odyssey prompt. DO NOT add poetic language. Be literal an
             userPrompt += `- Speech: "${spokenText}"\n`;
         }
         
-        if (gesture) {
-            userPrompt += `- Hand Gesture: ${gesture}\n`;
-            userPrompt += `  (Interpret as environmental change: weather, time of day, vegetation, architecture)\n`;
-        }
-        
         userPrompt += `- Volume: ${volume}% (${volume > 40 ? 'LOUD' : volume > 20 ? 'normal' : 'quiet'})\n`;
         userPrompt += `- Pitch: ${pitch} (${pitch.includes('high') ? 'bright/energetic' : pitch.includes('low') ? 'dark/serious' : 'balanced'})\n`;
         userPrompt += `- Energy: ${energy}\n`;
-        
-        if (volumeChange > 40) {
-            userPrompt += `- SUDDEN volume spike!\n`;
-        }
-        
-        if (loudDuration > 3) {
-            userPrompt += `- Sustained LOUD for ${loudDuration.toFixed(1)}s (building intensity)\n`;
-        }
-        
-        if (quietDuration > 4) {
-            userPrompt += `- Sustained quiet for ${quietDuration.toFixed(1)}s (building suspense)\n`;
-        }
         
         userPrompt += `\nCreate a visual scene description for Odyssey (max 25 words):
 - Focus on what user said: translate their words into visual action
@@ -1151,8 +1093,6 @@ Output ONLY the visual scene description.`;
         // Fallback to simple prompt if OpenAI fails
         if (spokenText) {
             return spokenText;
-        } else if (gesture) {
-            return gesture.split(' ')[1] || 'continue'; // Extract action from gesture name
         } else {
             return 'continue exploring';
         }
@@ -1336,14 +1276,9 @@ function onHandResults(results) {
                 }
             }
             
-            // Update gesture state (existing logic)
+            // Update gesture state (for UI display only, not sent to Odyssey)
             if (gesture && gesture !== currentGesture) {
-                console.log('🖐️ Gesture detected:', gesture);
                 currentGesture = gesture;
-                
-                if (collectingGestures) {
-                    gesturesInWindow.push(gesture);
-                }
             }
         }
     } else {
