@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Evolution Video</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="main-content">
+            <!-- Configuration Section -->
+            <div class="config-section" id="configSection">
+                <h2>⚙️ SETUP</h2>
+                <div class="config-input-group">
+                    <label for="apiKey">Odyssey API Key</label>
+                    <div class="input-with-button">
+                        <input type="password" id="apiKey" placeholder="Enter your Odyssey API Key">
+                        <button id="toggleKey" class="icon-btn">👁️</button>
+                    </div>
+                </div>
+                
+                <div class="config-input-group">
+                    <label for="openaiKey">OpenAI API Key</label>
+                    <div class="input-with-button">
+                        <input type="password" id="openaiKey" placeholder="Enter your OpenAI API Key">
+                        <button id="toggleOpenAIKey" class="icon-btn">👁️</button>
+                    </div>
+                </div>
+                
+                <div class="config-input-group">
+                    <label for="initialPrompt">Starting Scene</label>
+                    <textarea id="initialPrompt" rows="3" placeholder="Leave empty to use default"></textarea>
+                </div>
+                <div class="config-option">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="speechRecognition" checked>
+                        <span>Enable Speech Recognition</span>
+                    </label>
+                </div>
+                <div class="config-option">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="handGestures" checked>
+                        <span>Enable Hand Gesture Control</span>
+                    </label>
+                </div>
+                <button id="startBtn" class="btn btn-start">
+                    <span class="btn-icon">▶️</span>
+                    START EVOLUTION
+                </button>
+                <p class="hint">💡 Speak to create and evolve a living AI video world</p>
+                <p class="hint-small">Powered by Odyssey-2 Pro</p>
+            </div>
+
+            <!-- Video Section -->
+            <div class="video-section" id="videoSection" style="display: none;">
+                <div class="control-bar">
+                    <button id="stopBtn" class="btn btn-stop">
+                        <span class="btn-icon">⏹️</span>
+                        STOP
+                    </button>
+                    <div class="status-indicator">
+                        <span id="connectionStatus" class="status-badge">Connecting...</span>
+                    </div>
+                </div>
+
+                <!-- Video Display -->
+                <div class="video-display">
+                    <video id="videoElement" autoplay playsinline></video>
+                    <div class="video-overlay">
+                        <div class="overlay-indicator" id="generatingIndicator"></div>
+                        <div class="gesture-indicator" id="gestureIndicator"></div>
+                    </div>
+                </div>
+
+                <!-- Hand Tracking (hidden) -->
+                <video id="handVideo" class="hand-video" autoplay playsinline></video>
+                <canvas id="handCanvas" class="hand-canvas"></canvas>
+
+                <!-- Virtual Cursor (finger pointer) -->
+                <div id="virtualCursor" class="virtual-cursor">
+                    <div class="cursor-dot"></div>
+                    <div class="cursor-ring"></div>
+                    <div class="cursor-click-effect"></div>
+                </div>
+
+                <!-- Speech Panel -->
+                <div class="speech-panel">
+                    <div class="speech-header">
+                        <h3>🎤 YOUR VOICE</h3>
+                        <span id="speechStatus" class="status-badge listening">Listening...</span>
+                    </div>
+                    <div class="speech-content">
+                        <div id="spokenWords" class="spoken-words">
+                            Speak to shape the world...
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Info Panel -->
+                <div class="info-panel">
+                    <div class="info-item">
+                        <span class="info-label">Session Timer:</span>
+                        <span id="sessionTimer" class="info-value timer-value">150s</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Stream Status:</span>
+                        <span id="streamStatus" class="info-value">Not Started</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Interactions:</span>
+                        <span id="interactionCount" class="info-value">0</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Volume:</span>
+                        <span id="volumeValue" class="info-value">0%</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Pitch:</span>
+                        <span id="pitchValue" class="info-value">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Energy:</span>
+                        <span id="energyValue" class="info-value">0</span>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <footer>
+            <p>💡 Tip: Speak or play music to shape the evolving video world - your voice controls everything</p>
+        </footer>
+    </div>
+
+    <!-- MediaPipe Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <script type="module">
+        import { Odyssey } from 'https://esm.sh/@odysseyml/odyssey';
+        
+        // Make Odyssey available globally
+        window.Odyssey = Odyssey;
+        
+        // Wait for MediaPipe to load, then load main app
+        const checkMediaPipe = setInterval(() => {
+            if (window.Hands && window.Camera && window.drawConnectors) {
+                clearInterval(checkMediaPipe);
+                console.log('✅ MediaPipe loaded');
+                
+                const script = document.createElement('script');
+                script.src = 'app-main.js';
+                document.body.appendChild(script);
+            }
+        }, 100);
+    </script>
+</body>
+</html>
