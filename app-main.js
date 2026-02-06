@@ -84,10 +84,8 @@ let currentSceneState = ''; // Current evolved state
 // ==================== DOM ELEMENTS ====================
 
 const apiKeyInput = document.getElementById('apiKey');
-const openaiKeyInput = document.getElementById('openaiKey');
 const initialPromptInput = document.getElementById('initialPrompt');
 const toggleKeyBtn = document.getElementById('toggleKey');
-const toggleOpenAIKeyBtn = document.getElementById('toggleOpenAIKey');
 const speechRecognitionCheckbox = document.getElementById('speechRecognition');
 const handGesturesCheckbox = document.getElementById('handGestures');
 const startBtn = document.getElementById('startBtn');
@@ -124,7 +122,8 @@ const SESSION_DURATION = 150; // 150 seconds
 
 // ==================== INITIALIZATION ====================
 
-let openaiApiKey = '';
+// Loaded from config.js (not tracked by git)
+const openaiApiKey = window.OPENAI_API_KEY || '';
 
 window.addEventListener('DOMContentLoaded', async () => {
     const savedKey = localStorage.getItem('odyssey_api_key');
@@ -132,11 +131,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         apiKeyInput.value = savedKey;
     }
     
-    const savedOpenAIKey = localStorage.getItem('openai_api_key');
-    if (savedOpenAIKey) {
-        openaiKeyInput.value = savedOpenAIKey;
-        openaiApiKey = savedOpenAIKey;
-    }
     
     const savedPrompt = localStorage.getItem('initial_prompt');
     
@@ -182,24 +176,11 @@ toggleKeyBtn.addEventListener('click', () => {
     }
 });
 
-toggleOpenAIKeyBtn.addEventListener('click', () => {
-    if (openaiKeyInput.type === 'password') {
-        openaiKeyInput.type = 'text';
-        toggleOpenAIKeyBtn.textContent = '🔒';
-    } else {
-        openaiKeyInput.type = 'password';
-        toggleOpenAIKeyBtn.textContent = '👁️';
-    }
-});
 
 apiKeyInput.addEventListener('input', (e) => {
     localStorage.setItem('odyssey_api_key', e.target.value);
 });
 
-openaiKeyInput.addEventListener('input', (e) => {
-    openaiApiKey = e.target.value;
-    localStorage.setItem('openai_api_key', e.target.value);
-});
 
 speechRecognitionCheckbox.addEventListener('change', (e) => {
     speechEnabled = e.target.checked;
@@ -213,15 +194,9 @@ handGesturesCheckbox.addEventListener('change', (e) => {
 
 startBtn.addEventListener('click', async () => {
     const apiKey = apiKeyInput.value.trim();
-    openaiApiKey = openaiKeyInput.value.trim();
     
     if (!apiKey) {
         alert('❌ Please enter your Odyssey API Key!');
-        return;
-    }
-    
-    if (!openaiApiKey) {
-        alert('❌ Please enter your OpenAI API Key!');
         return;
     }
 
